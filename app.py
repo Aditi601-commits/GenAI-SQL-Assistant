@@ -16,48 +16,68 @@ except:
     st.error("⚠️ API Key missing! Check your .streamlit/secrets.toml")
     st.stop()
 
-# --- HELPER: LOAD CUSTOM DATA (SUPER SMART VERSION) ---
+# --- HELPER: LOAD CUSTOM DATA (ALL FORMATS) ---
 def load_custom_data(uploaded_file):
     conn = sqlite3.connect(':memory:')
     try:
-        # 1. Peek at the file to find the real header
-        if uploaded_file.name.endswith('.csv'):
-            df_raw = pd.read_csv(uploaded_file, header=None, nrows=10)
-        else:
-            df_raw = pd.read_excel(uploaded_file, header=None, nrows=10, engine='openpyxl')
+        file_ext = uploaded_file.name.split('.')[-1].lower()
         
-        # 2. Find the row with the most text (The Real Header)
-        best_header_row = 0
-        max_text_cols = 0
-        for i, row in df_raw.iterrows():
-            text_count = row.apply(lambda x: isinstance(x, str)).sum()
-            if text_count > max_text_cols:
-                max_text_cols = text_count
-                best_header_row = i
-        
-        # 3. Reload data from that row
-        uploaded_file.seek(0)
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file, header=best_header_row)
-        else:
-            df = pd.read_excel(uploaded_file, header=best_header_row, engine='openpyxl')
-        
-        # 4. REMOVE EMPTY COLUMNS (The Fix for "Column 0")
-        # Drops columns that are completely empty or named "Unnamed"
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-        df.dropna(axis=1, how='all', inplace=True)
+        # 1. READ DATA BASED ON FILE TYPE
+        if file_ext == 'csv':
+            # Peek to find header (Smart Detection from before)
+            df_peek = pd.read_csv(uploaded_file, header=None, nrows=10)
+            header_row = 0
+            max_text = 0
+            for i, row in df_peek.iterrows():
+                cnt = row.apply(lambda x: isinstance(x, str)).sum()
+                if cnt > max_text:
+                    max_text = cnt
+                    header_row = i
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, header=header_row)
 
-        # 5. Clean Column Names
+        elif file_ext in ['xls', 'xlsx']:
+            df_peek = pd.read_excel(uploaded_file, header=None, nrows=10, engine='openpyxl')
+            header_row = 0
+            max_text = 0
+            for i, row in df_peek.iterrows():
+                cnt = row.apply(lambda x: isinstance(x, str)).sum()
+                if cnt > max_text:
+                    max_text = cnt
+                    header_row = i
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, header=header_row, engine='openpyxl')
+            
+        elif file_ext == 'json':
+            # JSON is often nested, we try to flatten it
+            df = pd.read_json(uploaded_file)
+            
+        elif file_ext == 'parquet':
+            # Needs 'pip install pyarrow'
+            df = pd.read_parquet(uploaded_file)
+            
+        elif file_ext in ['tsv', 'txt']:
+            # Assume tab-separated for txt/tsv
+            df = pd.read_csv(uploaded_file, sep='\t')
+            
+        else:
+            return None, "Unsupported file format."
+
+        # 2. CLEANUP: Remove Empty Cols & Rows
+        # Remove columns named "Unnamed" or empty ones
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed', case=False, na=False)]
+        df.dropna(axis=1, how='all', inplace=True)
+        
+        # 3. CLEAN COLUMN NAMES
         cleaned_columns = []
         for c in df.columns:
-            # Clean special chars and spaces
-            clean_c = str(c).strip().replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '')
+            clean_c = str(c).strip().replace(' ', '_').replace('.', '_').replace('-', '_')
             cleaned_columns.append(clean_c)
         df.columns = cleaned_columns
         
-        # 6. Safety: Force dates to string
+        # 4. SAFETY: Force objects/dates to strings to prevent SQL crashes
         for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
+            if df[col].dtype == 'object' or pd.api.types.is_datetime64_any_dtype(df[col]):
                 df[col] = df[col].astype(str)
         
         df.to_sql('uploaded_data', conn, index=False, if_exists='replace')
@@ -81,7 +101,7 @@ def analyze_query_results(df, question):
     response = model.generate_content(prompt)
     return response.text
 
-# --- HELPER: SQL GENERATION ---
+# --- HELPER: SQL GENERATION (WITH SURGICAL CLEANING) ---
 def get_gemini_response(question, mode, schema_info):
     if mode == "default":
         context = """Tables: products, customers, sales. Revenue = SUM(total_amount)."""
@@ -99,11 +119,30 @@ def get_gemini_response(question, mode, schema_info):
     """
     model = genai.GenerativeModel('gemini-flash-latest')
     response = model.generate_content([prompt, question])
-    return response.text.strip().replace("```sql", "").replace("```", "")
+    sql = response.text.strip()
+    
+    # 1. Remove Markdown (standard)
+    sql = sql.replace("```sql", "").replace("```", "")
+    
+    # 2. SURGICAL CLEANUP (The Fix for "ite")
+    # This finds exactly where "SELECT" starts and deletes everything before it.
+    upper_sql = sql.upper()
+    if "SELECT" in upper_sql:
+        start_idx = upper_sql.find("SELECT")
+        sql = sql[start_idx:]  # Keep only from SELECT onwards
+    elif "WITH" in upper_sql:
+        start_idx = upper_sql.find("WITH")
+        sql = sql[start_idx:]
+
+    return sql
 
 # --- MAIN UI ---
 st.sidebar.header("📂 Data Source")
-uploaded_file = st.sidebar.file_uploader("Upload Excel/CSV", type=["csv", "xlsx"])
+# UPDATE: Added more file types here
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Data File", 
+    type=["csv", "xlsx", "xls", "json", "parquet", "tsv", "txt"]
+)
 
 mode = "default"
 conn = None
@@ -139,17 +178,16 @@ if mode == "default":
         if st.button("📉 Sales by Category", use_container_width=True): set_q("Count sales by category")
 else:
     # INTELLIGENT BUTTON LOGIC
-    # It scans for "interesting" columns (not IDs)
     try:
-        # 1. Find a "Category" column (Text based, distinct from ID)
+        # Find a categorical column (Text based, not ID)
         cat_col = None
         for col in schema_info:
-            if "ID" not in col.upper() and "DATE" not in col.upper():
+            if "ID" not in col.upper() and "DATE" not in col.upper() and "URL" not in col.upper():
                 cat_col = col
                 break
-        if not cat_col: cat_col = schema_info[0] # Fallback
+        if not cat_col: cat_col = schema_info[0]
         
-        # 2. Find a "Value" column (Metric like Salary, Amount)
+        # Find a value column (last column usually)
         val_col = schema_info[-1] 
 
         with col1:
@@ -199,6 +237,7 @@ if "last_result" in st.session_state and st.session_state.last_result is not Non
     st.success("Analysis Complete")
     st.dataframe(res)
     
+    # Chart Logic
     if len(res.columns) == 2:
         try:
             clean = res.copy()
