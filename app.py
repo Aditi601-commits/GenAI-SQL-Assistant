@@ -5,91 +5,217 @@ import google.generativeai as genai
 import os
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Sales Database Bot", page_icon="🛒", layout="centered")
+st.set_page_config(page_title="Universal Data Assistant", page_icon="🤖", layout="centered")
+st.title("🤖 Universal Data Assistant")
 
-# --- TITLE ---
-st.title("Sales Intelligence Bot")
-st.markdown("Ask questions about the **Sales Database** (Revenue, Customers, Products).")
-
-# LOAD API KEY FROM SECRETS 
+# --- API SETUP ---
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    genai.configure(api_key=GOOGLE_API_KEY)
 except:
-    st.error("⚠️ API Key missing! Please add it to .streamlit/secrets.toml")
+    st.error("⚠️ API Key missing! Check your .streamlit/secrets.toml")
     st.stop()
 
-genai.configure(api_key=GOOGLE_API_KEY)
+# --- HELPER: LOAD CUSTOM DATA (SUPER SMART VERSION) ---
+def load_custom_data(uploaded_file):
+    conn = sqlite3.connect(':memory:')
+    try:
+        # 1. Peek at the file to find the real header
+        if uploaded_file.name.endswith('.csv'):
+            df_raw = pd.read_csv(uploaded_file, header=None, nrows=10)
+        else:
+            df_raw = pd.read_excel(uploaded_file, header=None, nrows=10, engine='openpyxl')
+        
+        # 2. Find the row with the most text (The Real Header)
+        best_header_row = 0
+        max_text_cols = 0
+        for i, row in df_raw.iterrows():
+            text_count = row.apply(lambda x: isinstance(x, str)).sum()
+            if text_count > max_text_cols:
+                max_text_cols = text_count
+                best_header_row = i
+        
+        # 3. Reload data from that row
+        uploaded_file.seek(0)
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, header=best_header_row)
+        else:
+            df = pd.read_excel(uploaded_file, header=best_header_row, engine='openpyxl')
+        
+        # 4. REMOVE EMPTY COLUMNS (The Fix for "Column 0")
+        # Drops columns that are completely empty or named "Unnamed"
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+        df.dropna(axis=1, how='all', inplace=True)
 
-def get_gemini_response(question):
-    """
-    Prompt tailored strictly for the 'database.db' schema.
-    """
-    prompt = [
-        """
-        You are an expert SQL Assistant for a Sales Database.
+        # 5. Clean Column Names
+        cleaned_columns = []
+        for c in df.columns:
+            # Clean special chars and spaces
+            clean_c = str(c).strip().replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '')
+            cleaned_columns.append(clean_c)
+        df.columns = cleaned_columns
         
-        The user has a SQLite database named 'database.db' with these tables:
+        # 6. Safety: Force dates to string
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                df[col] = df[col].astype(str)
         
-        1. products (product_id, name, category, price, stock_quantity)
-        2. customers (customer_id, name, city, email, signup_date)
-        3. sales (sale_id, customer_id, product_id, quantity, total_amount, sale_date)
-        
-        STRICT RULES:
-        1. Return ONLY valid SQL.
-        2. If the user asks for "Revenue", calculate SUM(total_amount).
-        3. Use `LOWER(name) LIKE '%val%'` for case-insensitive text matching.
-        4. If the question is not about sales data, return "NO_SQL".
-        5. Return ONLY the SQL code. No markdown (no ```sql).
-        """
-    ]
+        df.to_sql('uploaded_data', conn, index=False, if_exists='replace')
+        return conn, df.columns.tolist()
+
+    except Exception as e:
+        return None, str(e)
+
+# --- HELPER: INSIGHTS ---
+def analyze_query_results(df, question):
+    data_summary = df.head(10).to_string()
+    prompt = f"""
+    You are a Data Analyst. User asked: "{question}"
+    Data found:
+    {data_summary}
     
-    model = genai.GenerativeModel('gemini-flash-lite-latest')
-    response = model.generate_content([prompt[0], question])
+    TASK: Provide 3 short, sharp business insights.
+    Format as bullet points.
+    """
+    model = genai.GenerativeModel('gemini-flash-latest')
+    response = model.generate_content(prompt)
+    return response.text
+
+# --- HELPER: SQL GENERATION ---
+def get_gemini_response(question, mode, schema_info):
+    if mode == "default":
+        context = """Tables: products, customers, sales. Revenue = SUM(total_amount)."""
+    else:
+        context = f"""Table: uploaded_data. Columns: {schema_info}"""
+
+    prompt = f"""
+    You are an expert SQL Assistant.
+    {context}
+    STRICT RULES:
+    1. Return ONLY valid SQLite SQL.
+    2. Use `LOWER(col) LIKE '%val%'` for text matching.
+    3. Return "NO_SQL" if unrelated.
+    4. Return ONLY code.
+    """
+    model = genai.GenerativeModel('gemini-flash-latest')
+    response = model.generate_content([prompt, question])
     return response.text.strip().replace("```sql", "").replace("```", "")
 
-def execute_query(sql_query):
-    # HARDCODED DATABASE CONNECTION
-    db_file = 'database.db'
-    
-    if not os.path.exists(db_file):
-        return f"Error: The file '{db_file}' does not exist. Please run setup_database.py first."
+# --- MAIN UI ---
+st.sidebar.header("📂 Data Source")
+uploaded_file = st.sidebar.file_uploader("Upload Excel/CSV", type=["csv", "xlsx"])
 
-    conn = sqlite3.connect(db_file)
+mode = "default"
+conn = None
+schema_info = []
+
+if uploaded_file:
+    mode = "custom"
+    st.info(f"Using: **{uploaded_file.name}**")
+    conn, schema_or_error = load_custom_data(uploaded_file)
+    if conn is None:
+        st.error(f"Error: {schema_or_error}")
+        st.stop()
+    schema_info = schema_or_error 
+else:
+    mode = "default"
+    if os.path.exists('database.db'):
+        conn = sqlite3.connect('database.db')
+    else:
+        st.error("⚠️ Default database.db not found.")
+        st.stop()
+
+# --- SMART BUTTONS ---
+st.write("### ⚡ Quick Actions")
+col1, col2, col3 = st.columns(3)
+def set_q(q): st.session_state.user_question = q
+
+if mode == "default":
+    with col1:
+        if st.button("💰 Total Revenue", use_container_width=True): set_q("What is the total revenue?")
+    with col2:
+        if st.button("🏆 Top Products", use_container_width=True): set_q("Show top 5 expensive products")
+    with col3:
+        if st.button("📉 Sales by Category", use_container_width=True): set_q("Count sales by category")
+else:
+    # INTELLIGENT BUTTON LOGIC
+    # It scans for "interesting" columns (not IDs)
     try:
-        if "DROP" in sql_query.upper() or "DELETE" in sql_query.upper():
-            return "SAFETY ALERT: Read-Only Mode."
+        # 1. Find a "Category" column (Text based, distinct from ID)
+        cat_col = None
+        for col in schema_info:
+            if "ID" not in col.upper() and "DATE" not in col.upper():
+                cat_col = col
+                break
+        if not cat_col: cat_col = schema_info[0] # Fallback
         
-        df = pd.read_sql_query(sql_query, conn)
-        return df
-    except Exception as e:
-        return f"SQL Error: {e}"
-    finally:
-        conn.close()
+        # 2. Find a "Value" column (Metric like Salary, Amount)
+        val_col = schema_info[-1] 
 
-# --- UI ---
-question = st.text_input("Ask a question:", placeholder="e.g., What is the total revenue from Electronics?")
+        with col1:
+            if st.button(f"📊 Count by {cat_col}", use_container_width=True): 
+                set_q(f"Count records for each {cat_col}")
+        with col2:
+            if st.button(f"📑 Top 5 by {val_col}", use_container_width=True): 
+                set_q(f"Show top 5 records with highest {val_col}")
+        with col3:
+            if st.button("👀 Sample Data", use_container_width=True): 
+                set_q("Show 5 random rows")
+    except:
+        st.warning("Could not generate buttons.")
 
-if st.button("Analyze"):
-    if not GOOGLE_API_KEY:
-        st.error("API Key Missing.")
+# --- INPUT & ANALYSIS ---
+if "user_question" not in st.session_state: st.session_state.user_question = ""
+question = st.text_input("Ask a question:", key="user_question")
+
+if st.button("Run Analysis", type="primary"):
+    if not question:
+        st.warning("Please enter a question.")
     else:
         with st.spinner("Thinking..."):
-            sql = get_gemini_response(question)
-            
-            if sql == "NO_SQL":
-                st.error("I can only answer questions about the Sales Database.")
-            else:
-                with st.expander("See SQL Query"):
-                    st.code(sql, language="sql")
-                
-                result = execute_query(sql)
-                
-                if isinstance(result, pd.DataFrame):
-                    st.success("Results:")
-                    st.dataframe(result)
-                    
-                    # Auto-Chart logic
-                    if len(result.columns) == 2:
-                        st.bar_chart(result.set_index(result.columns[0]))
+            try:
+                sql = get_gemini_response(question, mode, schema_info)
+                if sql == "NO_SQL":
+                    st.error("Cannot answer this.")
+                    st.session_state.last_result = None
                 else:
-                    st.error(result)
+                    if "DROP" in sql.upper() or "DELETE" in sql.upper():
+                        st.error("Read-only mode.")
+                    else:
+                        result = pd.read_sql_query(sql, conn)
+                        if result.empty:
+                            st.warning("No data found.")
+                            st.session_state.last_result = None
+                        else:
+                            st.session_state.last_result = result
+                            st.session_state.last_sql = sql
+                            st.session_state.last_question = question
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+# --- DISPLAY ---
+if "last_result" in st.session_state and st.session_state.last_result is not None:
+    res = st.session_state.last_result
+    st.success("Analysis Complete")
+    st.dataframe(res)
+    
+    if len(res.columns) == 2:
+        try:
+            clean = res.copy()
+            clean.columns = ["Category", "Value"]
+            clean["Value"] = pd.to_numeric(clean["Value"], errors='coerce')
+            st.write("### 📊 Visualization")
+            st.bar_chart(clean.set_index("Category"))
+        except: pass
+
+    st.markdown("---")
+    if st.button("✨ Generate AI Insights"):
+        with st.spinner("Analyzing..."):
+            try:
+                insights = analyze_query_results(res, st.session_state.last_question)
+                st.markdown(insights)
+            except: st.error("Quota reached.")
+
+    with st.expander("🛠️ View SQL"): st.code(st.session_state.last_sql, language="sql")
+
+if mode == "default" and conn: conn.close()
