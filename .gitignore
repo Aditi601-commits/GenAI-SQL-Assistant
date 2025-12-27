@@ -1,0 +1,7 @@
+# Ignore the API Key secrets
+.streamlit/secrets.toml
+
+# Ignore system files
+__pycache__/
+*.pyc
+
