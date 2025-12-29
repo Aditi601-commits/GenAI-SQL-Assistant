@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import google.generativeai as genai
+import plotly.express as px
 import time
 
 # --- PAGE CONFIGURATION ---
@@ -94,7 +95,6 @@ def get_gemini_response(question, schema_info):
     last_error = ""
     for attempt in range(3):
         try:
-            # Using the stable model alias as discussed
             model = genai.GenerativeModel('gemini-flash-latest')
             response = model.generate_content([prompt])
             sql = response.text.strip()
@@ -186,20 +186,22 @@ if len(schema_info) > 0:
 # --- ANALYSIS SECTION ---
 question = st.text_input("Ask a question about your data:", value=st.session_state.user_question)
 
-# Initialize Session State Variables to hold results
+# Initialize Session State
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 if "last_sql" not in st.session_state:
     st.session_state.last_sql = None
 if "last_question" not in st.session_state:
     st.session_state.last_question = None
+if "show_chart" not in st.session_state:
+    st.session_state.show_chart = False
 
-# ACTION: Run Analysis
 if st.button("Run Analysis", type="primary"):
     if not question:
         st.warning("Please enter a question.")
     else:
         st.session_state.user_question = question 
+        st.session_state.show_chart = False # Reset chart on new query
         
         with st.spinner("Analyzing..."):
             try:
@@ -208,7 +210,7 @@ if st.button("Run Analysis", type="primary"):
                 
                 if sql.startswith("ERROR:"):
                     st.error(sql)
-                    st.session_state.last_result = None # Reset on error
+                    st.session_state.last_result = None
                 else:
                     # 2. Execution
                     result = pd.read_sql_query(sql, conn)
@@ -217,7 +219,6 @@ if st.button("Run Analysis", type="primary"):
                         st.warning("No data found.")
                         st.session_state.last_result = None
                     else:
-                        # SUCCESS: SAVE TO STATE
                         st.session_state.last_result = result
                         st.session_state.last_sql = sql
                         st.session_state.last_question = question
@@ -227,17 +228,14 @@ if st.button("Run Analysis", type="primary"):
                 st.error(f"Error: {e}")
                 st.session_state.last_result = None
 
-# DISPLAY: Check if we have a result in memory to show
+# --- RESULTS DISPLAY ---
 if st.session_state.last_result is not None:
     result = st.session_state.last_result
     sql = st.session_state.last_sql
     
-    # --- RESULTS DISPLAY ---
     st.dataframe(result, use_container_width=True)
     
-    # --- AI INSIGHTS BUTTON ---
     st.markdown("---")
-    # This button now works because 'result' is saved in session state!
     if st.button("✨ Explain this Result (AI Insights)"):
         with st.spinner("Generating Business Intelligence..."):
             insights = generate_insights(result, st.session_state.last_question)
@@ -245,25 +243,60 @@ if st.session_state.last_result is not None:
             st.markdown(insights)
             st.info("⚠️ Analysis based on the top 20 rows of the result.")
 
-    # --- CHARTS & DOWNLOADS ---
     col_actions1, col_actions2 = st.columns(2)
     
     with col_actions1:
         csv = result.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Download Results", csv, "results.csv", "text/csv")
     
-    with st.expander("📊 Visualize Data"):
-        if len(result.columns) == 2:
-            clean = result.copy()
-            col_x = clean.columns[0]
-            col_y = clean.columns[1]
-            clean[col_y] = pd.to_numeric(clean[col_y], errors='coerce')
-            if any(x in col_x.lower() for x in ["date", "year"]):
-                st.line_chart(clean.set_index(col_x))
-            else:
-                st.bar_chart(clean.set_index(col_x))
+    # --- INTERACTIVE VISUALIZATION SECTION ---
+    with st.expander("📊 Visualize Data", expanded=True):
+        if len(result.columns) >= 2:
+            st.caption("Select options and click 'Generate Chart'")
+            
+            # Prepare Data
+            plot_df = result.copy()
+            numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
+            categorical_cols = plot_df.select_dtypes(exclude=['number']).columns.tolist()
+            
+            # Chart Controls
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                chart_type = st.selectbox("Chart Type", ["Bar", "Line", "Scatter", "Pie", "Histogram"])
+            with c2:
+                default_x = categorical_cols[0] if categorical_cols else plot_df.columns[0]
+                x_axis = st.selectbox("X-Axis", plot_df.columns, index=plot_df.columns.get_loc(default_x))
+            with c3:
+                default_y = numeric_cols[0] if numeric_cols else plot_df.columns[1]
+                if chart_type in ["Pie", "Histogram"]:
+                    y_axis = st.selectbox("Values / Y-Axis", [None] + list(plot_df.columns))
+                else:
+                    y_axis = st.selectbox("Y-Axis", plot_df.columns, index=plot_df.columns.get_loc(default_y))
+
+            # The "Show" Button
+            if st.button("Generate Chart"):
+                st.session_state.show_chart = True
+
+            # Only render if button was clicked
+            if st.session_state.show_chart:
+                try:
+                    if chart_type == "Bar":
+                        fig = px.bar(plot_df, x=x_axis, y=y_axis, title=f"{y_axis} by {x_axis}", template="plotly_dark")
+                    elif chart_type == "Line":
+                        fig = px.line(plot_df, x=x_axis, y=y_axis, title=f"{y_axis} Trend", template="plotly_dark")
+                    elif chart_type == "Scatter":
+                        fig = px.scatter(plot_df, x=x_axis, y=y_axis, title=f"{y_axis} vs {x_axis}", template="plotly_dark")
+                    elif chart_type == "Pie":
+                        fig = px.pie(plot_df, names=x_axis, values=y_axis, title=f"Distribution of {x_axis}", template="plotly_dark")
+                    elif chart_type == "Histogram":
+                        fig = px.histogram(plot_df, x=x_axis, title=f"Distribution of {x_axis}", template="plotly_dark")
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Could not generate chart: {e}")
+
         else:
-            st.write("Chart available for 2-column results (Label & Value).")
+            st.info("⚠️ Charts require at least 2 columns (e.g., Category & Value).")
 
     with st.expander("📜 View SQL Query"):
         st.code(sql, language="sql")
