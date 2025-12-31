@@ -415,6 +415,9 @@ if uploaded_file:
                 st.dataframe(result, use_container_width=True)
             
             with tab_viz:
+                # --- SECTION 1: STANDARD CHARTS (Bar, Line, Scatter, etc.) ---
+                st.subheader("📊 Standard Charts")
+                
                 if len(result.columns) >= 2:
                     plot_df = result.copy()
                     numeric_cols = plot_df.select_dtypes(include=['number']).columns.tolist()
@@ -453,6 +456,41 @@ if uploaded_file:
                             st.error(f"Viz Error: {e}")
                 else:
                     st.info("Visualizations need at least 2 columns.")
+
+                # --- SEPARATOR ---
+                st.markdown("---")
+
+                # --- SECTION 2: ADVANCED HEATMAP ---
+                st.subheader("🔥 Advanced: Correlation Heatmap")
+                st.caption("Explore relationships between numeric variables. (Red = Positive, Blue = Negative)")
+
+                if len(result.select_dtypes(include=['number']).columns) > 1:
+                    if st.button("Generate Heatmap"):
+                        try:
+                            numeric_df = result.select_dtypes(include=['number'])
+                            corr_matrix = numeric_df.corr()
+                            fig_corr = px.imshow(
+                                corr_matrix, 
+                                text_auto=True, 
+                                aspect="auto",
+                                color_continuous_scale="RdBu_r", 
+                                title="Correlation Matrix"
+                            )
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                            
+                            st.info("""
+                                    **How to read this:**
+                                    * **1.0 (Dark Red):** Perfect positive relationship (as X goes up, Y goes up).
+                                    * **-1.0 (Dark Blue):** Perfect negative relationship (as X goes up, Y goes down).
+                                    * **0 (White):** No relationship.
+                                    """)
+                            
+                        except Exception as e:
+                            st.error(f"Could not generate heatmap: {e}")
+                else:
+                    st.info("⚠️ Need at least 2 numeric columns (e.g., Price, Qty) to show correlations.")
+                    
+                
             
             with tab_insight:
                 # Insights are already generated, just display them
