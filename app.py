@@ -4,6 +4,7 @@ import pandas as pd
 import google.generativeai as genai
 import plotly.express as px
 import time
+from fpdf import FPDF  # <--- NEW IMPORT FOR PDF
 
 # --- PAGE CONFIGURATION (Full Width, Custom Title) ---
 st.set_page_config(
@@ -41,6 +42,19 @@ st.markdown("""
         margin-top: 0px !important;
         padding-top: 10px;
     }
+    /* FIX: Tab Hover Visibility */
+    button[data-baseweb="tab"] {
+        color: #e0e0e0 !important;
+    }
+    button[data-baseweb="tab"]:hover {
+        color: #ffffff !important;
+        background-color: #490753 !important;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #ffffff !important;
+        background-color: transparent !important;
+        border-top: 2px solid #D900FF;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -51,6 +65,75 @@ try:
 except:
     st.error("⚠️ API Key missing! Check your .streamlit/secrets.toml")
     st.stop()
+
+# --- HELPER: PDF GENERATION ---
+def create_pdf_report(user_question, sql_query, insights, df_preview):
+    class PDF(FPDF):
+        def header(self):
+            self.set_font('Arial', 'B', 15)
+            self.cell(0, 10, 'Universal Data Assistant - Analysis Report', 0, 1, 'C')
+            self.ln(5)
+            
+        def footer(self):
+            self.set_y(-15)
+            self.set_font('Arial', 'I', 8)
+            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+    # Helper to clean text for FPDF (handles special chars/emojis)
+    def clean_text(text):
+        if text:
+            return text.encode('latin-1', 'replace').decode('latin-1')
+        return ""
+
+    pdf = PDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    # 1. User Question
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. Analysis Request:", ln=True)
+    pdf.set_font("Arial", size=12)
+    pdf.multi_cell(0, 10, clean_text(f'"{user_question}"'))
+    pdf.ln(5)
+
+    # 2. AI Insights
+    if insights:
+        pdf.set_font("Arial", 'B', 12)
+        pdf.cell(0, 10, "2. AI Strategic Insights:", ln=True)
+        pdf.set_font("Arial", size=11)
+        # Strip Markdown * characters for cleaner PDF text
+        clean_insights = insights.replace('*', '').replace('#', '')
+        pdf.multi_cell(0, 8, clean_text(clean_insights))
+        pdf.ln(5)
+
+    # 3. SQL Query
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "3. Technical Query (SQL):", ln=True)
+    pdf.set_font("Courier", size=10)
+    pdf.multi_cell(0, 8, clean_text(sql_query))
+    pdf.ln(5)
+
+    # 4. Data Snapshot
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "4. Data Snapshot (Top 10 Rows):", ln=True)
+    pdf.set_font("Courier", size=8)
+    
+    # Table Header
+    cols = df_preview.columns.tolist()
+    if cols:
+        col_width = 190 / len(cols)
+        for col in cols:
+            pdf.cell(col_width, 8, clean_text(str(col)[:15]), border=1) # Truncate long headers
+        pdf.ln()
+        
+        # Table Rows
+        for _, row in df_preview.head(10).iterrows():
+            for col in cols:
+                val = str(row[col])
+                pdf.cell(col_width, 8, clean_text(val[:15]), border=1) # Truncate long values
+            pdf.ln()
+
+    return pdf.output(dest='S').encode('latin-1')
 
 # --- HELPER: LOAD CUSTOM DATA ---
 def load_custom_data(uploaded_file):
@@ -145,7 +228,7 @@ def get_gemini_response(question, schema_info, previous_context=None):
     last_error = ""
     for attempt in range(3):
         try:
-            model = genai.GenerativeModel('gemini-flash-latest')
+            model = genai.GenerativeModel('gemini-2.5-flash')
             response = model.generate_content([prompt])
             sql = response.text.strip()
             sql = sql.replace("```sql", "").replace("```sqlite", "").replace("```", "")
@@ -173,13 +256,13 @@ def generate_insights(df, question):
     Data Result (First 20 rows):
     {data_preview}
     
-    Task: Provide a brief, professional analysis.
+    Task: Provide a crisp, brief, professional analysis in 3 bullet points for each heading given below.
     1. Identify 3 Key Trends or Patterns.
     2. Highlight any Outliers or Anomalies.
     3. Suggest 1 Strategic Action based on this data.
     """
     try:
-        model = genai.GenerativeModel('gemini-flash-latest')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content([prompt])
         return response.text
     except Exception as e:
@@ -190,13 +273,15 @@ if "user_question" not in st.session_state: st.session_state.user_question = ""
 if "last_result" not in st.session_state: st.session_state.last_result = None
 if "last_sql" not in st.session_state: st.session_state.last_sql = None
 if "last_question" not in st.session_state: st.session_state.last_question = None
+if "last_insights" not in st.session_state: st.session_state.last_insights = "" # Store insights for PDF
 if "show_chart" not in st.session_state: st.session_state.show_chart = False
 
 def set_q(q): st.session_state.user_question = q
 
 # --- SIDEBAR UI ---
 with st.sidebar:
-    st.title("🤖 Universal Data Assistant")
+    st.markdown("## 🤖 **DATA** ASSISTANT") 
+    st.caption("Pro Edition")
     st.markdown("---")
     
     st.header("📂 Data Source")
@@ -296,6 +381,11 @@ if uploaded_file:
                                 st.session_state.last_result = result
                                 st.session_state.last_sql = sql
                                 st.session_state.last_question = question
+                                
+                                # --- AUTO-GENERATE INSIGHTS FOR PDF ---
+                                st.session_state.last_insights = generate_insights(result, question)
+                                # --------------------------------------
+                                
                     except Exception as e:
                         st.error(f"Error: {e}")
                         st.session_state.last_result = None
@@ -305,14 +395,24 @@ if uploaded_file:
         if st.session_state.last_result is not None:
             result = st.session_state.last_result
             sql = st.session_state.last_sql
+            insights = st.session_state.last_insights
+            
+            # --- NEW: DOWNLOAD BUTTONS ROW ---
+            d_col1, d_col2 = st.columns([1, 1])
+            with d_col1:
+                csv = result.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download Result", csv, "data.csv", "text/csv", use_container_width=True)
+            with d_col2:
+                # Generate PDF on the fly
+                pdf_bytes = create_pdf_report(st.session_state.last_question, sql, insights, result)
+                st.download_button("📄 Download PDF Report", pdf_bytes, "analysis_report.pdf", "application/pdf", use_container_width=True)
+            # ---------------------------------
             
             # TABS for organized viewing
             tab_table, tab_viz, tab_insight, tab_sql = st.tabs(["📄 Data Table", "📊 Visualization", "🧠 AI Insights", "📜 SQL"])
             
             with tab_table:
                 st.dataframe(result, use_container_width=True)
-                csv = result.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download Results", csv, "results.csv", "text/csv")
             
             with tab_viz:
                 if len(result.columns) >= 2:
@@ -347,7 +447,7 @@ if uploaded_file:
                             elif chart_type == "Pie":
                                 fig = px.pie(plot_df, names=x_axis, values=y_axis, template="plotly_dark")
                             elif chart_type == "Histogram":
-                                fig = px.histogram(plot_df, x=x_axis, template="plotly_dark")
+                                fig = px.histogram(plot_df, x=x_axis, y=y_axis, template="plotly_dark")
                             st.plotly_chart(fig, use_container_width=True)
                         except Exception as e:
                             st.error(f"Viz Error: {e}")
@@ -355,10 +455,9 @@ if uploaded_file:
                     st.info("Visualizations need at least 2 columns.")
             
             with tab_insight:
-                if st.button("✨ Generate AI Analysis"):
-                    with st.spinner("Thinking..."):
-                        insights = generate_insights(result, st.session_state.last_question)
-                        st.markdown(insights)
+                # Insights are already generated, just display them
+                st.markdown("### 🧠 AI Analysis")
+                st.markdown(insights)
             
             with tab_sql:
                 st.code(sql, language="sql")
