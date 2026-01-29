@@ -5,6 +5,14 @@ import google.generativeai as genai
 import plotly.express as px
 import time
 from fpdf import FPDF
+import re
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score
+import numpy as np
+
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -62,54 +70,94 @@ except:
     st.error("⚠️ API Key missing! Check your .streamlit/secrets.toml")
     st.stop()
 
-# --- HELPER: PDF GENERATION ---
+# --- HELPER: FIXED PDF REPORT ---
 def create_pdf_report(user_question, sql_query, insights, df_preview):
     class PDF(FPDF):
         def header(self):
-            self.set_font('Arial', 'B', 15)
-            self.cell(0, 10, 'Universal Data Assistant - Analysis Report', 0, 1, 'C')
-            self.ln(5)
+            # 1. Draw the Background Rectangle (Height 20mm)
+            self.set_fill_color(73, 7, 83)
+            self.rect(0, 0, 210, 20, 'F')
+            
+            # 2. FORCE cursor position to start inside the rect
+            self.set_y(5) 
+            
+            # 3. Write Text
+            self.set_font('Arial', 'B', 16)
+            self.set_text_color(255, 255, 255)
+            self.cell(0, 10, 'Executive Analysis Report', 0, 1, 'C')
+            self.ln(10) # Add space after header
+
         def footer(self):
             self.set_y(-15)
             self.set_font('Arial', 'I', 8)
-            self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+            self.set_text_color(128, 128, 128)
+            self.cell(0, 10, f'Universal Data Assistant | Page {self.page_no()}', 0, 0, 'C')
+
+        def section_title(self, title):
+            self.set_font('Arial', 'B', 12)
+            self.set_fill_color(240, 240, 240)
+            self.set_text_color(0, 0, 0)
+            self.cell(0, 8, f"  {title}", 0, 1, 'L', fill=True)
+            self.ln(4)
+
+        def chapter_body(self, body):
+            self.set_font('Arial', '', 10)
+            self.set_text_color(50, 50, 50)
+            self.multi_cell(0, 6, body)
+            self.ln(5)
 
     def clean_text(text):
         if text: return text.encode('latin-1', 'replace').decode('latin-1')
         return ""
 
     pdf = PDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
 
-    # Content
-    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "1. Analysis Request:", ln=True)
-    pdf.set_font("Arial", size=12); pdf.multi_cell(0, 10, clean_text(f'"{user_question}"'))
-    pdf.ln(5)
+    # 1. Question
+    pdf.section_title("1. Analysis Request")
+    pdf.chapter_body(clean_text(f'Question: "{user_question}"'))
 
+    # 2. Insights
     if insights:
-        pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "2. AI Strategic Insights:", ln=True)
-        pdf.set_font("Arial", size=11); pdf.multi_cell(0, 8, clean_text(insights.replace('*', '').replace('#', '')))
-        pdf.ln(5)
+        pdf.section_title("2. Key Strategic Insights")
+        pdf.chapter_body(clean_text(insights.replace('*', '').replace('#', '')))
 
-    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "3. Technical Query (SQL):", ln=True)
-    pdf.set_font("Courier", size=10); pdf.multi_cell(0, 8, clean_text(sql_query))
-    pdf.ln(5)
-
-    pdf.set_font("Arial", 'B', 12); pdf.cell(0, 10, "4. Data Snapshot (Top 10 Rows):", ln=True)
-    pdf.set_font("Courier", size=8)
+    # 3. Data Table (Fixed Overlap)
+    pdf.section_title("3. Data Evidence (Top 10 Rows)")
+    pdf.set_font("Courier", size=8) # Smaller font for table
     
     cols = df_preview.columns.tolist()
     if cols:
-        col_width = 190 / len(cols)
-        for col in cols: pdf.cell(col_width, 8, clean_text(str(col)[:15]), border=1)
+        page_width = 190
+        col_width = page_width / len(cols)
+        
+        # Header
+        pdf.set_fill_color(220, 220, 220)
+        pdf.set_font("Arial", 'B', 8)
+        for col in cols:
+            # Truncate to 12 chars to prevent overlap
+            pdf.cell(col_width, 8, clean_text(str(col)[:12]), 1, 0, 'C', fill=True)
         pdf.ln()
+        
+        # Rows
+        pdf.set_font("Arial", '', 8)
         for _, row in df_preview.head(10).iterrows():
-            for col in cols: pdf.cell(col_width, 8, clean_text(str(row[col])[:15]), border=1)
+            for col in cols:
+                pdf.cell(col_width, 8, clean_text(str(row[col])[:12]), 1, 0, 'C')
             pdf.ln()
+    
+    pdf.ln(10)
+
+    # 4. SQL
+    pdf.section_title("4. Technical Appendix (SQL)")
+    pdf.set_font("Courier", size=9)
+    pdf.set_text_color(80, 80, 80)
+    pdf.multi_cell(0, 5, clean_text(sql_query))
+
     return pdf.output(dest='S').encode('latin-1')
 
-# --- HELPER: LOAD & CLEAN DATA ---
+# --- UPDATED HELPER: LOAD & CLEAN & MASK ---
 def process_uploaded_file(uploaded_file):
     try:
         file_ext = uploaded_file.name.split('.')[-1].lower()
@@ -132,8 +180,9 @@ def process_uploaded_file(uploaded_file):
             df = pd.read_json(uploaded_file)
         else:
             return None, "Unsupported file format."
-
-        # Standardization
+        
+        # Basic Cleaning
+        
         df.dropna(axis=1, how='all', inplace=True)
         new_cols = []
         for i, col in enumerate(df.columns):
@@ -148,6 +197,25 @@ def process_uploaded_file(uploaded_file):
         return df, None
     except Exception as e:
         return None, str(e)
+
+# --- NEW FUNCTION: PII MASKING ---
+def mask_pii(df):
+    df_masked = df.copy()
+    # Regex patterns for Email and Phone (Basic)
+    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    phone_pattern = r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+    
+    masked_count = 0
+    
+    for col in df_masked.columns:
+        if df_masked[col].dtype == 'object': # Only check text columns
+            # Check if column looks like PII
+            sample = " ".join(df_masked[col].astype(str).head(10).tolist())
+            if re.search(email_pattern, sample) or re.search(phone_pattern, sample) or "email" in col.lower() or "phone" in col.lower():
+                df_masked[col] = "*****" # REDACT
+                masked_count += 1
+                
+    return df_masked, masked_count
 
 # --- HELPER: SQL SYNC ---
 def push_to_sqlite(df):
@@ -175,7 +243,7 @@ def get_gemini_response(question, schema_info, previous_context=None):
     """
     for _ in range(3):
         try:
-            model = genai.GenerativeModel('gemini-2.0-flash')
+            model = genai.GenerativeModel('gemini-flash-lite-latest')
             response = model.generate_content([prompt])
             sql = response.text.strip().replace("```sql", "").replace("```sqlite", "").replace("```", "")
             if "SELECT" in sql.upper() or "WITH" in sql.upper(): return sql
@@ -185,13 +253,11 @@ def get_gemini_response(question, schema_info, previous_context=None):
 def generate_insights(df, question):
     data_preview = df.head(20).to_string(index=False)
     prompt = f"""
-    Role: Senior Business Analyst. Question: "{question}"
-    Data (Top 20 rows):
-    {data_preview}
-    Task: 1. Identify 3 Key Trends. 2. Highlight Outliers. 3. Suggest 1 Strategic Action.
+    Role: Senior Analyst. Question: "{question}"
+    Task: Write crisp bullet points for each of the following 3 headings : 1. 3 Key Trends. 2. Outliers. 3. 1 Strategic Action.
     """
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        model = genai.GenerativeModel('gemini-flash-lite-latest')
         return model.generate_content([prompt]).text
     except Exception as e: return f"Error: {e}"
 
@@ -257,40 +323,40 @@ if st.session_state.active_df is not None:
             
         with tab_doc:
             df = st.session_state.active_df
-            missing_count = df.isnull().sum().sum()
-            dup_count = df.duplicated().sum()
-            
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Rows", len(df))
-            c2.metric("Missing Cells", missing_count, delta_color="inverse")
-            c3.metric("Duplicate Rows", dup_count, delta_color="inverse")
+            c1.metric("Rows", len(df))
+            c2.metric("Missing", df.isnull().sum().sum(), delta_color="inverse")
+            c3.metric("Duplicates", df.duplicated().sum(), delta_color="inverse")
             
-            if missing_count == 0 and dup_count == 0:
-                st.success("✅ Your data is perfectly healthy!")
-            else:
-                st.warning("⚠️ Issues detected. Use the tools below to fix them.")
-                
-            st.markdown("### 💊 Prescriptions (Quick Fixes)")
-            fx1, fx2, fx3 = st.columns(3)
+            st.markdown("### 🛡️ Privacy & Quality Tools")
+            
+            fx1, fx2, fx3, fx4 = st.columns(4) # Added 4th column
+            
             with fx1:
-                if st.button("🧼 Remove Duplicates"):
+                if st.button("🧼 Remove Duplicaes"):
                     st.session_state.active_df = df.drop_duplicates()
-                    st.toast("Duplicates removed!", icon="✅")
-                    st.rerun()
+                    st.toast("Duplicates removed!", icon="✅"); st.rerun()
             with fx2:
-                if st.button("🩹 Fill Missing (0/Unknown)"):
+                if st.button("🩹 Fill missing rows"):
                     num_cols = df.select_dtypes(include=['number']).columns
-                    cat_cols = df.select_dtypes(exclude=['number']).columns
                     df[num_cols] = df[num_cols].fillna(0)
-                    df[cat_cols] = df[cat_cols].fillna("Unknown")
                     st.session_state.active_df = df
-                    st.toast("Missing values filled!", icon="✅")
-                    st.rerun()
+                    st.toast("Missing rows filled!", icon="✅"); st.rerun()
             with fx3:
-                if st.button("✂️ Drop Missing Rows"):
+                if st.button("✂️ Drop missing rows"):
                     st.session_state.active_df = df.dropna()
-                    st.toast("Rows with missing data removed!", icon="✅")
-                    st.rerun()
+                    st.toast("Missing Rows dropped!", icon="✅"); st.rerun()
+            
+            # --- NEW PRIVACY BUTTON ---
+            with fx4:
+                if st.button("🕵️ Mask PII"):
+                    masked_df, count = mask_pii(df)
+                    if count > 0:
+                        st.session_state.active_df = masked_df
+                        st.success(f"🔒 Redacted {count} sensitive columns!")
+                        st.rerun()
+                    else:
+                        st.info("No PII detected.")
 
     # --- KPI HEADER ---
     st.subheader("📊 Data Overview")
@@ -301,7 +367,7 @@ if st.session_state.active_df is not None:
     kpi3.metric("Missing", f"{curr_df.isnull().sum().sum():,}")
     kpi4.metric("Duplicates", curr_df.duplicated().sum())
     st.markdown("---")
-
+    
     # --- CHAT & RESULTS ---
     col_chat, col_results = st.columns([1, 2])
 
