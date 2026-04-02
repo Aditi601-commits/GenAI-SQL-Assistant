@@ -7,6 +7,85 @@ import time
 from fpdf import FPDF
 import re
 
+def run_ml_pipeline(df):
+    df = df.copy()
+
+    # Drop missing values
+    df = df.fillna(df.mean(numeric_only=True))
+
+    # -------- AUTO TARGET DETECTION --------
+    target_col = None
+    for col in df.columns:
+        name = col.lower()
+        if any(x in name for x in ['target', 'label', 'class', 'sentiment', 'output']):
+            target_col = col
+            break
+
+    if target_col is None:
+        return None, None
+    # ✅ Reduce classes (VERY IMPORTANT)
+    df[target_col] = df[target_col].replace({
+        "Very Positive": "Positive",
+        "Very Negative": "Negative"
+    })
+
+    st.write("Target column:", target_col)
+    st.write("Unique values:", df[target_col].unique())
+    
+    # -------- CLEAN TARGET COLUMN --------
+    df[target_col] = df[target_col].astype(str).str.lower().str.strip()
+    
+    y = df[target_col]
+    X = df.drop(columns=[target_col])
+
+    df[target_col] = df[target_col].str.lower().str.strip()
+    
+    # -------- ENCODING --------
+    from sklearn.preprocessing import LabelEncoder
+
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = LabelEncoder().fit_transform(X[col].astype(str))
+            
+        if y.dtype == 'object':
+            y = LabelEncoder().fit_transform(y.astype(str))
+
+    # -------- HANDLE DATETIME --------
+    for col in X.columns:
+        try:
+            X[col] = pd.to_datetime(X[col])
+            X[col] = X[col].astype('int64')
+        except:
+            pass
+
+    # -------- FEATURE ENGINEERING --------
+    for col in X.columns[:2]:
+        X[f"{col}_squared"] = X[col] ** 2
+
+    # -------- SCALING --------
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+
+    # -------- TRAIN TEST SPLIT --------
+    from sklearn.model_selection import train_test_split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    # -------- MODEL --------
+    from sklearn.ensemble import RandomForestClassifier
+    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
+
+    preds = model.predict(X_test)
+
+    from sklearn.metrics import accuracy_score, f1_score
+    acc = accuracy_score(y_test, preds)
+    f1 = f1_score(y_test, preds, average='weighted')
+
+    return acc, f1
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -286,7 +365,8 @@ with st.sidebar:
         if st.session_state.file_id != uploaded_file.file_id:
             df_new, error = process_uploaded_file(uploaded_file)
             if df_new is not None:
-                st.session_state.active_df = df_new
+                st.session_state.active_df = df_new.copy()
+                st.session_state.raw_df = df_new.copy()
                 st.session_state.file_id = uploaded_file.file_id
                 st.session_state.last_result = None
             else:
@@ -306,6 +386,7 @@ with st.sidebar:
         5. **Reporting:** FPDF generates downloadable insights.
         """)
 
+
 # --- MAIN APP ---
 conn = None
 schema_info = []
@@ -316,10 +397,20 @@ if st.session_state.active_df is not None:
     
     # --- DATA DOCTOR & PREVIEW ---
     with st.expander("🛠️ Data Doctor & Preview (Click to Expand)", expanded=False):
-        tab_doc, tab_preview = st.tabs(["🩺 Data Health Check", "🔍 Raw Data Preview"])
+        tab_doc, tab_raw, tab_clean = st.tabs([
+            "🩺 Data Health Check",
+            "🔍 Raw Data",
+            "✨ Cleaned Data"
+        ])
         
-        with tab_preview:
-            st.dataframe(st.session_state.active_df, use_container_width=True)
+    with tab_raw:
+        st.dataframe(st.session_state.raw_df, use_container_width=True)
+
+    with tab_clean:
+        st.dataframe(st.session_state.active_df, use_container_width=True)
+
+    with tab_doc:
+        # your existing health check code
             
         with tab_doc:
             df = st.session_state.active_df
@@ -333,27 +424,33 @@ if st.session_state.active_df is not None:
             fx1, fx2, fx3, fx4 = st.columns(4) # Added 4th column
             
             with fx1:
-                if st.button("🧼 Remove Duplicaes"):
+                if st.button("🧼 Remove Duplicates"):
                     st.session_state.active_df = df.drop_duplicates()
-                    st.toast("Duplicates removed!", icon="✅"); st.rerun()
+                    st.toast("Duplicates removed!", icon="✅")
+                    time.sleep(1.5)
+                    st.rerun()
             with fx2:
                 if st.button("🩹 Fill missing rows"):
                     num_cols = df.select_dtypes(include=['number']).columns
                     df[num_cols] = df[num_cols].fillna(0)
                     st.session_state.active_df = df
-                    st.toast("Missing rows filled!", icon="✅"); st.rerun()
+                    st.toast("Missing rows filled!", icon="✅")
+                    time.sleep(1.5)
+                    st.rerun()
             with fx3:
                 if st.button("✂️ Drop missing rows"):
                     st.session_state.active_df = df.dropna()
-                    st.toast("Missing Rows dropped!", icon="✅"); st.rerun()
+                    st.toast("Missing rows dropped!", icon="✅")
+                    time.sleep(1.5)
+                    st.rerun()
             
             # --- NEW PRIVACY BUTTON ---
             with fx4:
                 if st.button("🕵️ Mask PII"):
                     masked_df, count = mask_pii(df)
                     if count > 0:
-                        st.session_state.active_df = masked_df
                         st.success(f"🔒 Redacted {count} sensitive columns!")
+                        time.sleep(1.5)
                         st.rerun()
                     else:
                         st.info("No PII detected.")
@@ -471,10 +568,40 @@ if st.session_state.active_df is not None:
 
             with t3: st.markdown(st.session_state.last_insights)
             with t4: st.code(st.session_state.last_sql, language="sql")
+            
+            # --- ML VALIDATION SECTION ---
+            st.markdown("---")
+            st.subheader("🧪 ML Validation (Data Quality Check)")
 
-        else:
-            st.info("👈 Use the chat to query data.")
-else:
+            if st.button("Run ML Validation"):
+                raw_df = st.session_state.get("raw_df")
+                processed_df = st.session_state.get("active_df")
+                
+                if raw_df is None:
+                    st.warning("Upload data first.")
+                else:
+                    with st.spinner("Running ML validation..."):
+                        results = []
+                        
+                        raw_acc, raw_f1 = run_ml_pipeline(raw_df)
+                        if raw_acc is not None:
+                            results.append(("Raw Dataset", raw_acc, raw_f1))
+                            
+                        clean_acc, clean_f1 = run_ml_pipeline(processed_df)
+                        if clean_acc is not None:
+                            results.append(("Cleaned Dataset", clean_acc, clean_f1))
+                                
+                        if results:
+                            df_results = pd.DataFrame(results, columns=["Dataset", "Accuracy", "F1 Score"])
+                            st.dataframe(df_results, use_container_width=True)
+                            st.bar_chart(df_results.set_index("Dataset"))
+                        if len(results) == 2:
+                            improvement = (clean_acc - raw_acc) * 100
+                            st.success(f"📈 Improvement after cleaning: {improvement:.2f}%")
+                        else:
+                            st.error("No valid target column found (need target/label/sentiment column).")
+                
+else:              
     # --- MODERN LANDING PAGE ---
     st.markdown("""
     <style>
