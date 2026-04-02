@@ -2,7 +2,9 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import google.generativeai as genai
-import os
+import plotly.express as px
+import time
+from fpdf import FPDF  # <--- NEW IMPORT FOR PDF
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Sales Intelligence Hub", page_icon="📊", layout="centered")
@@ -127,4 +129,32 @@ if st.button("Run Analysis", type="primary"):
                         with st.expander("🛠️ View Technical Details (SQL)", expanded=False):
                             st.code(sql, language="sql")
                 else:
-                    st.error(result)
+                    st.info("Visualizations need at least 2 columns.")
+            
+            with tab_insight:
+                # Insights are already generated, just display them
+                st.markdown("### 🧠 AI Analysis")
+                st.markdown(insights)
+            
+            with tab_sql:
+                st.code(sql, language="sql")
+        
+        else:
+            st.info("👈 Use the chat on the left to query your data. Results will appear here.")
+            st.markdown("""
+                **Tips for better results:**
+                * Be specific (e.g., "Show top 10 sales by country")
+                * Use filters (e.g., "Only where quantity > 5")
+                * Ask follow-up questions!
+            """)
+
+else:
+    st.markdown("""
+    <div style="text-align: center; padding: 50px;">
+        <h1>🤖 Universal Data Assistant</h1>
+        <p>Your AI-powered partner for data analysis.</p>
+        <p>Upload a CSV or Excel file on the left to get started.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+if conn: conn.close()

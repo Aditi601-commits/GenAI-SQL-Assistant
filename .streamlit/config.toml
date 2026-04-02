@@ -1,0 +1,9 @@
+
+
+
+[theme]
+primaryColor = "#D900FF"         # Neon Magenta (High contrast on purple)
+backgroundColor = "#1a0723"      # Your Deep Purple
+secondaryBackgroundColor = "#490753" # Your Lighter Purple
+textColor = "#FAFAFA"            # White text
+font = "sans serif"
