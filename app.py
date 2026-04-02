@@ -4,7 +4,7 @@ import pandas as pd
 import google.generativeai as genai
 import plotly.express as px
 import time
-from fpdf import FPDF  # <--- NEW IMPORT FOR PDF
+from fpdf import FPDF
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Sales Intelligence Hub", page_icon="📊", layout="centered")
@@ -148,12 +148,95 @@ if st.button("Run Analysis", type="primary"):
                 * Ask follow-up questions!
             """)
 
+        else:
+            st.info("👈 Use the chat to query data.")
 else:
+    # --- MODERN LANDING PAGE ---
     st.markdown("""
-    <div style="text-align: center; padding: 50px;">
-        <h1>🤖 Universal Data Assistant</h1>
-        <p>Your AI-powered partner for data analysis.</p>
-        <p>Upload a CSV or Excel file on the left to get started.</p>
+    <style>
+        .landing-header {
+            text-align: center;
+            padding: 4rem 1rem;
+            background: linear-gradient(180deg, rgba(73,7,83,0.2) 0%, rgba(14,17,23,0) 100%);
+            border-radius: 20px;
+            margin-bottom: 2rem;
+        }
+        .landing-title {
+            font-size: 3rem;
+            font-weight: 800;
+            background: -webkit-linear-gradient(45deg, #FAFAFA, #D900FF);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 1rem;
+        }
+        .landing-subtitle {
+            font-size: 1.2rem;
+            color: #b0b0b0;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-top: 3rem;
+        }
+        .feature-card {
+            background-color: #262730;
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid #464b5f;
+            text-align: left;
+            transition: transform 0.2s ease;
+        }
+        .feature-card:hover {
+            transform: translateY(-5px);
+            border-color: #D900FF;
+        }
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+        .feature-title {
+            font-weight: bold;
+            color: #fff;
+            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
+        }
+        .feature-desc {
+            color: #a0a0a0;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+    </style>
+
+    <div class="landing-header">
+        <div class="landing-title">Data Analysis, Reimagined.</div>
+        <div class="landing-subtitle">Stop wrestling with spreadsheets. Upload your data and let AI handle the cleaning, SQL querying, and visualization for you.</div>
+    </div>
+
+    <div class="feature-grid">
+        <div class="feature-card">
+            <span class="feature-icon">🧠</span>
+            <div class="feature-title">AI-Powered Analytics</div>
+            <div class="feature-desc">Powered by Gemini 2.0. Just ask questions in plain English and get SQL-accurate answers instantly.</div>
+        </div>
+        <div class="feature-card">
+            <span class="feature-icon">🩺</span>
+            <div class="feature-title">Smart Data Doctor</div>
+            <div class="feature-desc">Automatically detect missing values and duplicates. Fix messy datasets with a single click.</div>
+        </div>
+        <div class="feature-card">
+            <span class="feature-icon">📊</span>
+            <div class="feature-title">Dynamic Visualization</div>
+            <div class="feature-desc">Create Bar Charts, Line Graphs, and Heatmaps on the fly without writing a single line of code.</div>
+        </div>
+        <div class="feature-card">
+            <span class="feature-icon">📑</span>
+            <div class="feature-title">Executive Reporting</div>
+            <div class="feature-desc">Turn your insights into professional PDF reports ready for your next management meeting.</div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
