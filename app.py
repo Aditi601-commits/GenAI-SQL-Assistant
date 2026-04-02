@@ -94,52 +94,9 @@ import numpy as np
 
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(
-    page_title="Universal Data Assistant",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# --- CUSTOM CSS ---
-st.markdown("""
-    <style>
-    .block-container {
-        padding-top: 3rem;
-        padding-bottom: 1rem;
-        padding-left: 2rem;
-        padding-right: 2rem;
-    }
-    div[data-testid="stMetric"] {
-        background-color: #262730;
-        border: 1px solid #464b5f;
-        padding: 10px;
-        border-radius: 10px;
-        color: white;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 8px;
-    }
-    h3 {
-        margin-top: 0px !important;
-        padding-top: 10px;
-    }
-    /* Tabs Styling */
-    button[data-baseweb="tab"] {
-        color: #e0e0e0 !important;
-    }
-    button[data-baseweb="tab"]:hover {
-        color: #ffffff !important;
-        background-color: #490753 !important;
-    }
-    button[data-baseweb="tab"][aria-selected="true"] {
-        color: #ffffff !important;
-        background-color: transparent !important;
-        border-top: 2px solid #D900FF;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+st.set_page_config(page_title="Sales Intelligence Hub", page_icon="📊", layout="centered")
+st.title("📊 Sales Intelligence Hub")
+st.markdown("Analyze your sales data with AI. Click a quick option or type your own question.")
 
 # --- API SETUP ---
 try:
@@ -310,15 +267,16 @@ def get_gemini_response(question, schema_info, previous_context=None):
     if previous_context:
         history_str = f"PREVIOUS: Q='{previous_context['question']}' SQL='{previous_context['sql']}'. If follow-up, modify SQL."
 
+# --- HELPER FUNCTIONS ---
+def analyze_query_results(df, question):
+    data_summary = df.head(10).to_string()
     prompt = f"""
-    Database Schema: {schema_str}
-    {history_str}
-    Current User Question: "{question}"
-    Task: Write a valid SQLite SQL query.
-    1. Return ONLY the SQL code. No markdown.
-    2. STRICTLY FOLLOW any row limits requested (e.g., "5 rows").
-    3. If the user does NOT specify a limit, default to LIMIT 10.
-    4. Use LOWER(col) LIKE '%val%' for text search.
+    You are a Data Analyst. User asked: "{question}"
+    Data found:
+    {data_summary}
+    
+    TASK: Provide 3 short, sharp business insights based on this data.
+    Format as bullet points.
     """
     for _ in range(3):
         try:
@@ -335,6 +293,14 @@ def generate_insights(df, question):
     Role: Senior Analyst. Question: "{question}"
     Task: Write crisp bullet points for each of the following 3 headings : 1. 3 Key Trends. 2. Outliers. 3. 1 Strategic Action.
     """
+    model = genai.GenerativeModel('gemini-flash-lite-latest')
+    response = model.generate_content([prompt, question])
+    return response.text.strip().replace("```sql", "").replace("```", "")
+
+def execute_query(sql_query):
+    if not os.path.exists('database.db'):
+        return "⚠️ Database not found. Run setup_database.py."
+    conn = sqlite3.connect('database.db')
     try:
         model = genai.GenerativeModel('gemini-flash-lite-latest')
         return model.generate_content([prompt]).text
@@ -497,33 +463,28 @@ if st.session_state.active_df is not None:
                         
                         sql = get_gemini_response(question, schema_info, prev_ctx)
                         
-                        if sql.startswith("ERROR:"):
-                            st.error(sql)
-                        else:
-                            result = pd.read_sql_query(sql, conn)
-                            if result.empty:
-                                st.warning("No data found.")
-                            else:
-                                st.session_state.last_result = result
-                                st.session_state.last_sql = sql
-                                st.session_state.last_question = question
-                                st.session_state.last_insights = generate_insights(result, question)
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+                        # B. Show Chart (if applicable)
+                        if len(result.columns) == 2:
+                            st.bar_chart(result.set_index(result.columns[0]))
 
-    with col_results:
-        if st.session_state.last_result is not None:
-            result = st.session_state.last_result
+                        # C. Insights (Closed by default)
+                        with st.spinner("Generating insights..."):
+                            insights = analyze_query_results(result, question)
+                            
+                        # 'expanded=False' keeps it closed
+                        with st.expander(f"💡 View AI Insights for: '{question}'", expanded=False):
+                            st.markdown(insights)
+                            
+                        # D. SQL (Closed by default)
+                        with st.expander("🛠️ View Technical Details (SQL)", expanded=False):
+                            st.code(sql, language="sql")
+                else:
+                    st.info("Visualizations need at least 2 columns.")
             
-            d1, d2 = st.columns([1,1])
-            with d1: st.download_button("📥 CSV", result.to_csv(index=False).encode('utf-8'), "data.csv", "text/csv", use_container_width=True)
-            with d2: 
-                pdf_bytes = create_pdf_report(st.session_state.last_question, st.session_state.last_sql, st.session_state.last_insights, result)
-                st.download_button("📄 PDF Report", pdf_bytes, "report.pdf", "application/pdf", use_container_width=True)
-
-            t1, t2, t3, t4 = st.tabs(["📄 Data", "📊 Visualize", "🧠 Insights", "📜 SQL"])
-            
-            with t1: st.dataframe(result, use_container_width=True)
+            with tab_insight:
+                # Insights are already generated, just display them
+                st.markdown("### 🧠 AI Analysis")
+                st.markdown(insights)
             
             with t2:
                 st.subheader("📊 Standard Charts")
